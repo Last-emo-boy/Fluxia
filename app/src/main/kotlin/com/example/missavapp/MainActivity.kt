@@ -41,6 +41,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyGridScope
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -52,6 +53,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.FilterList
@@ -77,7 +79,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
@@ -191,6 +195,13 @@ private enum class MainTab(@StringRes val titleRes: Int, val icon: androidx.comp
     Collections(R.string.tab_collections, Icons.Filled.Bookmark),
     Me(R.string.tab_me, Icons.Filled.Person),
 }
+
+private val PrimaryTabs = listOf(
+    MainTab.Home,
+    MainTab.Search,
+    MainTab.Collections,
+    MainTab.Me
+)
 
 private enum class CollectionMode(@StringRes val titleRes: Int) {
     Favorite(R.string.collection_favorite),
@@ -392,12 +403,14 @@ private fun AppScreen(vm: MainViewModel) {
             .imePadding()
 
         when (currentTab) {
-            MainTab.Home -> HomePage(
+            MainTab.Home,
+            MainTab.Channels -> HomePage(
                 vm = vm,
                 modifier = base,
                 onOpenVideo = { item -> vm.loadVideoDetail(item) },
                 onRetry = { vm.loadSection(vm.currentSection) },
-                onShowSettings = { showSettings = true }
+                onShowSettings = { showSettings = true },
+                onOpenSearch = { currentTab = MainTab.Search }
             )
             MainTab.Search -> SearchPage(
                 vm = vm,
@@ -410,7 +423,6 @@ private fun AppScreen(vm: MainViewModel) {
                     if (vm.searchKeyword.isBlank()) vm.loadSection(vm.currentSection) else vm.search()
                 }
             )
-            MainTab.Channels -> ChannelPage(vm = vm, modifier = base, onOpenVideo = { item -> vm.loadVideoDetail(item) })
             MainTab.Collections -> {
                 CollectionsPage(
                     vm = vm,
@@ -564,7 +576,7 @@ private fun VideoAppTopBar(
                 )
             }
 
-            if (currentTab != MainTab.Search) {
+            if (currentTab != MainTab.Search && currentTab != MainTab.Home && currentTab != MainTab.Channels) {
                 Card(
                     modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(999.dp),
@@ -610,16 +622,28 @@ private fun VideoAppTopBar(
 
 @Composable
 private fun VideoBottomNavigationBar(selected: MainTab, onSelect: (MainTab) -> Unit) {
-    NavigationBar(
-        containerColor = MaterialTheme.colorScheme.surface
+    Surface(
+        shadowElevation = 10.dp,
+        color = MaterialTheme.colorScheme.surface
     ) {
-        MainTab.values().forEach { item ->
-            NavigationBarItem(
-                selected = selected == item,
-                onClick = { onSelect(item) },
-                icon = { Icon(item.icon, contentDescription = stringResource(item.titleRes)) },
-                label = { Text(stringResource(item.titleRes), fontSize = 11.sp) }
-            )
+        NavigationBar(
+            containerColor = Color.Transparent
+        ) {
+            PrimaryTabs.forEach { item ->
+                NavigationBarItem(
+                    selected = selected == item,
+                    onClick = { onSelect(item) },
+                    icon = { Icon(item.icon, contentDescription = stringResource(item.titleRes)) },
+                    label = { Text(stringResource(item.titleRes), fontSize = 11.sp) },
+                    colors = NavigationBarItemDefaults.colors(
+                        selectedIconColor = BrandBlue,
+                        selectedTextColor = BrandBlue,
+                        indicatorColor = BrandBlue.copy(alpha = 0.12f),
+                        unselectedIconColor = TxtSecondary,
+                        unselectedTextColor = TxtSecondary
+                    )
+                )
+            }
         }
     }
 }
@@ -630,14 +654,77 @@ private fun HomePage(
     modifier: Modifier,
     onOpenVideo: (VideoCard) -> Unit,
     onRetry: () -> Unit,
-    onShowSettings: () -> Unit
+    onShowSettings: () -> Unit,
+    onOpenSearch: () -> Unit
 ) {
     var historyExpanded by rememberSaveable { mutableStateOf(false) }
+    val hasGridContent = when (vm.videos) {
+        is LoadState.Idle,
+        is LoadState.Success -> vm.filteredVideos.isNotEmpty()
+        else -> false
+    }
 
-    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    if (hasGridContent) {
+        VideoGrid(
+            videos = vm.filteredVideos,
+            onOpenVideo = onOpenVideo,
+            canLoadMore = vm.canLoadMoreSection,
+            isLoadingMore = vm.isLoadingMoreSection,
+            onLoadMore = vm::loadNextSectionPage,
+            modifier = modifier,
+            headerContent = {
+                item(span = { GridItemSpan(maxLineSpan) }) {
+                    HomeHeaderSection(
+                        vm = vm,
+                        historyExpanded = historyExpanded,
+                        onHistoryExpandedChange = { historyExpanded = it },
+                        onOpenVideo = onOpenVideo,
+                        onOpenSearch = onOpenSearch
+                    )
+                }
+            }
+        )
+    } else {
+        Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            HomeHeaderSection(
+                vm = vm,
+                historyExpanded = historyExpanded,
+                onHistoryExpandedChange = { historyExpanded = it },
+                onOpenVideo = onOpenVideo,
+                onOpenSearch = onOpenSearch
+            )
+
+            FeedState(
+                state = vm.videos,
+                videos = vm.filteredVideos,
+                onOpenVideo = onOpenVideo,
+                onRetry = onRetry,
+                onSync = { vm.syncCloudflareCookies() },
+                onOpenSettings = onShowSettings,
+                canLoadMore = vm.canLoadMoreSection,
+                isLoadingMore = vm.isLoadingMoreSection,
+                onLoadMore = vm::loadNextSectionPage
+            )
+        }
+    }
+}
+
+@Composable
+private fun HomeHeaderSection(
+    vm: MainViewModel,
+    historyExpanded: Boolean,
+    onHistoryExpandedChange: (Boolean) -> Unit,
+    onOpenVideo: (VideoCard) -> Unit,
+    onOpenSearch: () -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         if (vm.uiMessage != null) {
             NoticeBar(text = vm.uiMessage.orEmpty(), onDismiss = vm::clearMessage)
         }
+
+        HomeHeroCard(
+            onOpenSearch = onOpenSearch
+        )
 
         if (vm.watchHistory.isNotEmpty()) {
             val showHistoryRail = historyExpanded || vm.watchHistory.size <= 2
@@ -646,17 +733,25 @@ private fun HomePage(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                SectionHeading(
-                    title = stringResource(R.string.section_continue_watching_title),
-                    subtitle = stringResource(R.string.section_continue_watching_subtitle)
+                Text(
+                    text = stringResource(R.string.section_continue_watching_title),
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 14.sp,
+                    color = TxtSecondary
                 )
-                TextButton(onClick = { historyExpanded = !historyExpanded }) {
-                    Text(stringResource(if (showHistoryRail) R.string.action_collapse else R.string.action_expand))
+                TextButton(
+                    onClick = { onHistoryExpandedChange(!showHistoryRail) },
+                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)
+                ) {
+                    Text(
+                        text = stringResource(if (showHistoryRail) R.string.action_collapse else R.string.action_expand),
+                        fontSize = 12.sp
+                    )
                 }
             }
             if (showHistoryRail) {
                 ContinueWatchingRail(
-                    items = vm.watchHistory.take(6),
+                    items = vm.watchHistory.take(4),
                     onOpenVideo = onOpenVideo
                 )
             } else {
@@ -664,7 +759,7 @@ private fun HomePage(
                     item = vm.watchHistory.first(),
                     totalCount = vm.watchHistory.size,
                     onOpenVideo = onOpenVideo,
-                    onExpand = { historyExpanded = true }
+                    onExpand = { onHistoryExpandedChange(true) }
                 )
             }
         }
@@ -679,18 +774,6 @@ private fun HomePage(
                 )
             }
         }
-
-        FeedState(
-            state = vm.videos,
-            videos = vm.filteredVideos,
-            onOpenVideo = onOpenVideo,
-            onRetry = onRetry,
-            onSync = { vm.syncCloudflareCookies() },
-            onOpenSettings = onShowSettings,
-            canLoadMore = vm.canLoadMoreSection,
-            isLoadingMore = vm.isLoadingMoreSection,
-            onLoadMore = vm::loadNextSectionPage
-        )
     }
 }
 
@@ -733,8 +816,14 @@ private fun SearchPage(
             onQueryChange = vm::setSearchKeyword,
             onSearch = onSearch,
             onClear = { vm.setSearchKeyword("") },
-            placeholder = stringResource(R.string.search_all_channels)
+            placeholder = stringResource(R.string.search_hint)
         )
+
+        if (vm.searchKeyword.isNotBlank()) {
+            SearchStatusRow(
+                resultCount = filteredVideos.size
+            )
+        }
 
         if (shouldRunMissavFallback && missavFallbackUrl != null) {
             val fallbackUrl = missavFallbackUrl
@@ -771,14 +860,16 @@ private fun SearchPage(
             )
         }
 
-        FeedState(
-            state = vm.videos,
-            videos = filteredVideos,
-            onOpenVideo = onOpenVideo,
-            onRetry = onRetry,
-            onSync = { vm.syncCloudflareCookies() },
-            onOpenSettings = onOpenSettings
-        )
+        Box(modifier = Modifier.weight(1f)) {
+            FeedState(
+                state = vm.videos,
+                videos = filteredVideos,
+                onOpenVideo = onOpenVideo,
+                onRetry = onRetry,
+                onSync = { vm.syncCloudflareCookies() },
+                onOpenSettings = onOpenSettings
+            )
+        }
     }
 }
 
@@ -786,7 +877,91 @@ private fun SearchPage(
 private fun SectionHeading(title: String, subtitle: String) {
     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
         Text(title, fontWeight = FontWeight.Bold, fontSize = 17.sp)
-        Text(subtitle, color = TxtSecondary, fontSize = 11.sp)
+        if (subtitle.isNotBlank()) {
+            Text(subtitle, color = TxtSecondary, fontSize = 11.sp)
+        }
+    }
+}
+
+@Composable
+private fun HomeHeroCard(
+    onOpenSearch: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(
+                    brush = Brush.verticalGradient(
+                        colors = listOf(
+                            BrandBlue.copy(alpha = 0.12f),
+                            MaterialTheme.colorScheme.surface,
+                            MaterialTheme.colorScheme.surface
+                        )
+                    )
+                )
+                .padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = stringResource(R.string.home_hero_title),
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 18.sp
+                )
+                Card(
+                    shape = CircleShape,
+                    colors = CardDefaults.cardColors(containerColor = BrandBlue.copy(alpha = 0.10f)),
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Icon(
+                            Icons.Filled.PlayArrow,
+                            contentDescription = null,
+                            tint = BrandBlue,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+            }
+
+            Card(
+                onClick = onOpenSearch,
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = if (MaterialTheme.colorScheme.background == DarkBg) {
+                        DarkCard
+                    } else {
+                        Color(0xFFF3F6FA)
+                    }
+                ),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Filled.Search, contentDescription = null, tint = BrandBlue)
+                    Text(
+                        text = stringResource(R.string.search_all_channels),
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 13.sp
+                    )
+                }
+            }
+
+        }
     }
 }
 
@@ -814,23 +989,24 @@ private fun ContinueWatchingSummaryCard(
 ) {
     val context = LocalContext.current
     val title = item.video.title.ifBlank { stringResource(R.string.video_untitled) }
+    val sourceColor = if (item.video.sourceSite.contains("Jable", ignoreCase = true)) BrandPink else BrandBlue
     Card(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(18.dp),
+        shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         onClick = { onOpenVideo(item.video) }
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(12.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                .padding(10.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Box(
                 modifier = Modifier
-                    .size(width = 120.dp, height = 72.dp)
-                    .clip(RoundedCornerShape(14.dp))
+                    .size(width = 104.dp, height = 62.dp)
+                    .clip(RoundedCornerShape(12.dp))
                     .background(Color(0xFFECF1F7))
             ) {
                 if (!item.video.thumbnail.isNullOrBlank()) {
@@ -844,8 +1020,12 @@ private fun ContinueWatchingSummaryCard(
             }
             Column(
                 modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
+                verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
+                SourceTag(
+                    source = item.video.sourceSite.ifBlank { "Missav" },
+                    textColor = sourceColor
+                )
                 Text(
                     text = title,
                     fontWeight = FontWeight.SemiBold,
@@ -853,12 +1033,11 @@ private fun ContinueWatchingSummaryCard(
                     overflow = TextOverflow.Ellipsis
                 )
                 Text(
-                    text = stringResource(R.string.collections_recent_history_format, totalCount),
-                    color = TxtSecondary,
-                    fontSize = 11.sp
-                )
-                Text(
-                    text = formatRelativeTime(context, item.playedAt),
+                    text = buildString {
+                        append(stringResource(R.string.collections_recent_history_format, totalCount))
+                        append(" · ")
+                        append(formatRelativeTime(context, item.playedAt))
+                    },
                     color = TxtSecondary,
                     fontSize = 11.sp
                 )
@@ -872,7 +1051,16 @@ private fun ContinueWatchingSummaryCard(
                     trackColor = BrandBlue.copy(alpha = 0.12f)
                 )
             }
-            FilledTonalButton(onClick = onExpand) {
+            FilledTonalButton(
+                onClick = onExpand,
+                shape = RoundedCornerShape(999.dp),
+                colors = ButtonDefaults.filledTonalButtonColors(
+                    containerColor = sourceColor.copy(alpha = 0.12f),
+                    contentColor = sourceColor
+                )
+            ) {
+                Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(4.dp))
                 Text(stringResource(R.string.action_expand))
             }
         }
@@ -1381,20 +1569,29 @@ private fun LibraryStatCard(title: String, value: String, accent: Color, modifie
 private fun NoticeBar(text: String, onDismiss: () -> Unit) {
     Card(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = BrandBlue.copy(alpha = 0.12f)),
-        shape = RoundedCornerShape(12.dp)
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        shape = RoundedCornerShape(16.dp)
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(12.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = BrandBlue.copy(alpha = 0.12f)),
+                shape = CircleShape,
+                modifier = Modifier.size(32.dp)
+            ) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Icon(Icons.Filled.Refresh, contentDescription = null, tint = BrandBlue, modifier = Modifier.size(16.dp))
+                }
+            }
             Text(
                 text = text,
-                modifier = Modifier,
-                color = BrandBlue,
+                modifier = Modifier.weight(1f),
+                color = TxtPrimary,
                 fontSize = 12.sp,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis
@@ -1434,8 +1631,29 @@ private fun SearchInput(
         modifier = Modifier
             .fillMaxWidth()
             .height(56.dp),
-        shape = RoundedCornerShape(28.dp)
+        shape = RoundedCornerShape(18.dp),
+        colors = OutlinedTextFieldDefaults.colors(
+            focusedBorderColor = BrandBlue.copy(alpha = 0.55f),
+            unfocusedBorderColor = DividerColor,
+            focusedContainerColor = MaterialTheme.colorScheme.surface,
+            unfocusedContainerColor = MaterialTheme.colorScheme.surface,
+            cursorColor = BrandBlue
+        )
     )
+}
+
+@Composable
+private fun SearchStatusRow(
+    resultCount: Int
+) {
+    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        item {
+            MetaInfoChip(
+                text = stringResource(R.string.search_result_count_format, resultCount),
+                color = BrandPink
+            )
+        }
+    }
 }
 
 @Composable
@@ -1468,16 +1686,29 @@ private fun FeedState(
             }
         }
         is LoadState.Loading -> {
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 14.dp),
+                shape = RoundedCornerShape(24.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
             ) {
-                LinearProgressIndicator(
-                    progress = { 0.45f },
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Text(stringResource(R.string.feed_loading), color = TxtSecondary, fontSize = 12.sp)
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp, vertical = 28.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    CircularProgressIndicator(color = BrandBlue, strokeWidth = 3.dp)
+                    Text(stringResource(R.string.feed_loading), color = TxtPrimary, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        stringResource(R.string.search_all_channels),
+                        color = TxtSecondary,
+                        fontSize = 12.sp,
+                        textAlign = TextAlign.Center
+                    )
+                }
             }
         }
         is LoadState.Error -> {
@@ -1519,11 +1750,20 @@ private fun ErrorBox(message: String, onRetry: () -> Unit, onSync: () -> Unit, o
     val displayMessage = sanitizeUiErrorMessage(LocalContext.current, message)
     Card(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(12.dp),
+        shape = RoundedCornerShape(20.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
     ) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text(stringResource(R.string.error_loading_title), fontWeight = FontWeight.SemiBold)
+            Card(
+                colors = CardDefaults.cardColors(containerColor = BrandPink.copy(alpha = 0.12f)),
+                shape = CircleShape,
+                modifier = Modifier.size(38.dp)
+            ) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Icon(Icons.Filled.Refresh, contentDescription = null, tint = BrandPink, modifier = Modifier.size(18.dp))
+                }
+            }
+            Text(stringResource(R.string.error_loading_title), fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
             Text(displayMessage, color = TxtSecondary)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = onRetry) {
@@ -1546,11 +1786,20 @@ private fun ErrorBox(message: String, onRetry: () -> Unit, onSync: () -> Unit, o
 private fun CloudflareBox(onRetry: () -> Unit, onOpenSettings: () -> Unit, onSync: () -> Unit) {
     Card(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(12.dp),
+        shape = RoundedCornerShape(20.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
     ) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text(stringResource(R.string.cloudflare_box_title), fontWeight = FontWeight.SemiBold)
+            Card(
+                colors = CardDefaults.cardColors(containerColor = BrandBlue.copy(alpha = 0.12f)),
+                shape = CircleShape,
+                modifier = Modifier.size(38.dp)
+            ) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Icon(Icons.Filled.Search, contentDescription = null, tint = BrandBlue, modifier = Modifier.size(18.dp))
+                }
+            }
+            Text(stringResource(R.string.cloudflare_box_title), fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
             Text(stringResource(R.string.cloudflare_box_subtitle), color = TxtSecondary)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = onRetry) {
@@ -1569,13 +1818,32 @@ private fun CloudflareBox(onRetry: () -> Unit, onOpenSettings: () -> Unit, onSyn
 
 @Composable
 private fun EmptyState(title: String, subtitle: String) {
-    Column(
-        modifier = Modifier.fillMaxWidth().padding(top = 28.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(6.dp)
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 20.dp),
+        shape = RoundedCornerShape(24.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
     ) {
-        Text(title, fontWeight = FontWeight.SemiBold, color = TxtPrimary)
-        Text(subtitle, color = TxtSecondary, fontSize = 12.sp, textAlign = TextAlign.Center)
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 28.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Card(
+                shape = CircleShape,
+                colors = CardDefaults.cardColors(containerColor = BrandBlue.copy(alpha = 0.10f)),
+                modifier = Modifier.size(52.dp)
+            ) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Icon(Icons.Filled.Search, contentDescription = null, tint = BrandBlue)
+                }
+            }
+            Text(title, fontWeight = FontWeight.SemiBold, color = TxtPrimary)
+            Text(subtitle, color = TxtSecondary, fontSize = 12.sp, textAlign = TextAlign.Center)
+        }
     }
 }
 
@@ -1585,7 +1853,9 @@ private fun VideoGrid(
     onOpenVideo: (VideoCard) -> Unit,
     canLoadMore: Boolean = false,
     isLoadingMore: Boolean = false,
-    onLoadMore: (() -> Unit)? = null
+    onLoadMore: (() -> Unit)? = null,
+    modifier: Modifier = Modifier,
+    headerContent: LazyGridScope.() -> Unit = {}
 ) {
     val gridState = rememberLazyGridState()
 
@@ -1608,25 +1878,31 @@ private fun VideoGrid(
         contentPadding = PaddingValues(bottom = 120.dp),
         horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
-        modifier = Modifier.fillMaxHeight()
+        modifier = modifier.fillMaxSize()
     ) {
+        headerContent()
         items(videos, key = { it.href }) { item ->
             VideoCardItem(video = item, onOpen = { onOpenVideo(item) })
         }
         if (isLoadingMore) {
             item(span = { GridItemSpan(maxLineSpan) }) {
-                Column(
+                Card(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(vertical = 10.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                        .padding(vertical = 6.dp),
+                    shape = RoundedCornerShape(18.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
                 ) {
-                    LinearProgressIndicator(
-                        progress = { 0.6f },
-                        modifier = Modifier.fillMaxWidth(0.45f)
-                    )
-                    Text(stringResource(R.string.feed_loading), color = TxtSecondary, fontSize = 12.sp)
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 14.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        CircularProgressIndicator(color = BrandBlue, modifier = Modifier.size(20.dp), strokeWidth = 2.5.dp)
+                        Text(stringResource(R.string.feed_loading), color = TxtSecondary, fontSize = 12.sp)
+                    }
                 }
             }
         }
@@ -1642,7 +1918,7 @@ private fun VideoCardItem(video: VideoCard, onOpen: () -> Unit) {
     val unnamedLabel = stringResource(R.string.video_unnamed)
 
     Card(
-        shape = RoundedCornerShape(16.dp),
+        shape = RoundedCornerShape(20.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         onClick = onOpen,
         modifier = Modifier.fillMaxWidth()
@@ -1653,7 +1929,7 @@ private fun VideoCardItem(video: VideoCard, onOpen: () -> Unit) {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .aspectRatio(16f / 10f)
+                            .aspectRatio(16f / 10.2f)
                             .background(
                                 brush = Brush.verticalGradient(
                                     colors = listOf(
@@ -1672,15 +1948,38 @@ private fun VideoCardItem(video: VideoCard, onOpen: () -> Unit) {
                         )
                     }
                 } else {
-                    AsyncImage(
-                        model = cover,
-                        contentDescription = video.title,
-                        contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                    Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .aspectRatio(16f / 10f)
+                            .aspectRatio(16f / 10.2f)
                             .background(Color(0xFFECF1F7))
-                    )
+                    ) {
+                        AsyncImage(
+                            model = cover,
+                            contentDescription = video.title,
+                            contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .align(Alignment.BottomStart)
+                                .background(
+                                    Brush.verticalGradient(
+                                        colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.72f))
+                                    )
+                                )
+                                .padding(horizontal = 10.dp, vertical = 8.dp)
+                        ) {
+                            Text(
+                                text = video.code.ifBlank { source },
+                                color = Color.White,
+                                fontSize = 11.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
                 }
 
                 SourceTag(
@@ -1692,14 +1991,15 @@ private fun VideoCardItem(video: VideoCard, onOpen: () -> Unit) {
                 )
             }
 
-            Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 11.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
                 Text(
                     text = video.title.ifBlank { untitledLabel },
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                     color = MaterialTheme.colorScheme.onSurface,
-                    fontWeight = FontWeight.Medium,
-                    fontSize = 13.sp
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 13.sp,
+                    lineHeight = 18.sp
                 )
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -1714,7 +2014,7 @@ private fun VideoCardItem(video: VideoCard, onOpen: () -> Unit) {
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
-                        stringResource(R.string.video_view_detail),
+                        source,
                         fontSize = 11.sp,
                         color = sourceColor
                     )
@@ -1727,13 +2027,13 @@ private fun VideoCardItem(video: VideoCard, onOpen: () -> Unit) {
 @Composable
 private fun SourceTag(source: String, textColor: Color, modifier: Modifier = Modifier) {
     Card(
-        colors = CardDefaults.cardColors(containerColor = textColor.copy(alpha = 0.15f)),
-        shape = RoundedCornerShape(10.dp),
+        colors = CardDefaults.cardColors(containerColor = textColor.copy(alpha = 0.16f)),
+        shape = RoundedCornerShape(999.dp),
         modifier = modifier
     ) {
         Text(
             text = source,
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
             fontSize = 10.sp,
             color = textColor,
             maxLines = 1
@@ -1744,11 +2044,11 @@ private fun SourceTag(source: String, textColor: Color, modifier: Modifier = Mod
 @Composable
 private fun VideoListItem(item: VideoCard, onClick: (VideoCard) -> Unit, trailing: (@Composable () -> Unit)? = null) {
     val untitledLabel = stringResource(R.string.video_untitled)
+    val sourceColor = if (item.sourceSite.contains("Jable", ignoreCase = true)) BrandPink else BrandBlue
     Card(
         modifier = Modifier
-            .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surface),
-        shape = RoundedCornerShape(12.dp),
+            .fillMaxWidth(),
+        shape = RoundedCornerShape(18.dp),
         onClick = { onClick(item) }
     ) {
         Row(
@@ -1756,21 +2056,26 @@ private fun VideoListItem(item: VideoCard, onClick: (VideoCard) -> Unit, trailin
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            AsyncImage(
-                model = item.thumbnail,
-                contentDescription = item.title,
+            Box(
                 modifier = Modifier
-                    .size(96.dp)
-                    .background(Color(0xFFECEEF2)),
-                contentScale = androidx.compose.ui.layout.ContentScale.Crop
-            )
+                    .size(width = 112.dp, height = 66.dp)
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(Color(0xFFECEEF2))
+            ) {
+                AsyncImage(
+                    model = item.thumbnail,
+                    contentDescription = item.title,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = androidx.compose.ui.layout.ContentScale.Crop
+                )
+            }
 
-            Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                 Text(item.title.ifBlank { untitledLabel }, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 Text(item.code, color = TxtSecondary, fontSize = 11.sp)
                 SourceTag(
                     source = item.sourceSite.ifBlank { "Missav" },
-                    textColor = if (item.sourceSite.contains("Jable", ignoreCase = true)) BrandPink else BrandBlue
+                    textColor = sourceColor
                 )
             }
 
@@ -1887,6 +2192,7 @@ private fun DetailSheetContent(
     val canDownload = playableUrl != null
     val cover = detail.thumbnails.firstOrNull()
     val untitledLabel = stringResource(R.string.video_untitled)
+    val availableSourceCount = detail.availableSources.distinctBy { it.url }.size
 
     ModalBottomSheet(onDismissRequest = onClose, sheetState = sheetState) {
         Column(
@@ -1986,33 +2292,36 @@ private fun DetailSheetContent(
             Text(
                 detail.title.ifBlank { untitledLabel },
                 fontWeight = FontWeight.Bold,
-                fontSize = 20.sp,
-                lineHeight = 26.sp,
+                fontSize = 22.sp,
+                lineHeight = 30.sp,
                 maxLines = 3,
                 overflow = TextOverflow.Ellipsis
             )
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                SourceTag(
-                    source = detail.sourceSite.ifBlank { "Missav" },
-                    textColor = sourceColor
-                )
-                if (detail.code.isNotBlank()) {
-                    Text(
-                        text = detail.code.uppercase(Locale.ROOT),
-                        color = TxtSecondary,
-                        fontSize = 12.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                item {
+                    SourceTag(
+                        source = detail.sourceSite.ifBlank { "Missav" },
+                        textColor = sourceColor
                     )
                 }
+                if (detail.code.isNotBlank()) {
+                    item {
+                        MetaInfoChip(
+                            text = detail.code.uppercase(Locale.ROOT),
+                            color = TxtSecondary
+                        )
+                    }
+                }
+                if (availableSourceCount > 1) {
+                    item {
+                        MetaInfoChip(
+                            text = stringResource(R.string.detail_available_sources_count, availableSourceCount),
+                            color = BrandPink
+                        )
+                    }
+                }
             }
-
-            DetailInfoCard(detail = detail, accentColor = sourceColor)
 
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
                 Button(
@@ -2044,14 +2353,16 @@ private fun DetailSheetContent(
                         }
                     )
                 }
-                Button(
+                FilledTonalButton(
                     onClick = { onDownload(detail) },
                     enabled = canDownload,
                     modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(12.dp),
-                    colors = ButtonDefaults.buttonColors(
+                    colors = ButtonDefaults.filledTonalButtonColors(
                         containerColor = sourceColor.copy(alpha = 0.14f),
-                        contentColor = sourceColor
+                        contentColor = sourceColor,
+                        disabledContainerColor = sourceColor.copy(alpha = 0.08f),
+                        disabledContentColor = sourceColor.copy(alpha = 0.5f)
                     )
                 ) {
                     Icon(Icons.Filled.Download, contentDescription = null)
@@ -2068,63 +2379,26 @@ private fun DetailSheetContent(
                 )
             }
 
-            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                item {
-                    SourcePill(
-                        text = stringResource(R.string.detail_chip_favorite),
-                        selected = false,
-                        onClick = { onToggleFavorite(detail) },
-                        compact = true,
-                        selectedBackground = BrandPink
-                    )
-                }
-                item {
-                    SourcePill(
-                        text = stringResource(R.string.detail_chip_copy_link),
-                        selected = false,
-                        onClick = { onCopy(playableUrl ?: detail.sourceUrl) },
-                        compact = true,
-                        selectedBackground = BrandBlue
-                    )
-                }
-                item {
-                    SourcePill(
-                        text = stringResource(R.string.common_close),
-                        selected = false,
-                        onClick = onClose,
-                        compact = true,
-                        selectedBackground = TxtSecondary
-                    )
-                }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                MiniIconAction(
+                    icon = Icons.Filled.Favorite,
+                    tint = BrandPink,
+                    onClick = { onToggleFavorite(detail) },
+                    modifier = Modifier.weight(1f)
+                )
+                MiniIconAction(
+                    icon = Icons.Filled.ContentCopy,
+                    tint = BrandBlue,
+                    onClick = { onCopy(playableUrl ?: detail.sourceUrl) },
+                    modifier = Modifier.weight(1f)
+                )
             }
 
-            if (detail.actresses.isNotEmpty()) {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(stringResource(R.string.detail_section_actresses), fontWeight = FontWeight.Medium)
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        items(detail.actresses) { actress ->
-                            MetaInfoChip(text = actress.name, color = BrandPink)
-                        }
-                    }
-                }
-            }
-
-            if (detail.tags.isNotEmpty()) {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(stringResource(detailTagSectionTitleRes(detail.sourceSite)), fontWeight = FontWeight.Medium)
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        items(detail.tags) { tag ->
-                            MetaInfoChip(
-                                text = tag,
-                                color = if (detail.sourceSite.isJableSource()) BrandPink else BrandBlue
-                            )
-                        }
-                    }
-                }
-            }
-
-            if (detail.availableSources.isNotEmpty()) {
-                Text(stringResource(R.string.detail_section_switch_sources), fontWeight = FontWeight.Medium)
+            if (detail.availableSources.size > 1) {
+                HorizontalDivider(color = DividerColor.copy(alpha = 0.7f))
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(detail.availableSources.distinctBy { it.url }) { source ->
                         SourcePill(
@@ -2139,6 +2413,7 @@ private fun DetailSheetContent(
             }
 
             if (detail.recommendations.isNotEmpty()) {
+                HorizontalDivider(color = DividerColor.copy(alpha = 0.7f))
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(stringResource(detailRecommendationTitleRes(detail.sourceSite)), fontWeight = FontWeight.Medium)
                     detail.recommendations.distinctBy { it.href }.forEach { recommendation ->
@@ -2149,6 +2424,29 @@ private fun DetailSheetContent(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun MiniIconAction(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    tint: Color,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Card(
+        modifier = modifier.clickable(onClick = onClick),
+        colors = CardDefaults.cardColors(containerColor = tint.copy(alpha = 0.10f)),
+        shape = RoundedCornerShape(14.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 10.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(18.dp))
         }
     }
 }
@@ -2165,66 +2463,6 @@ private fun MetaInfoChip(text: String, color: Color) {
             fontSize = 11.sp,
             color = color,
             maxLines = 1
-        )
-    }
-}
-
-@Composable
-private fun DetailInfoCard(detail: VideoDetail, accentColor: Color) {
-    val separator = stringResource(R.string.separator_middle_dot)
-    val actressSummary = detail.actresses.take(4).joinToString(separator) { it.name }
-    val tagSummary = detail.tags.take(6).joinToString(separator)
-
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = accentColor.copy(alpha = 0.08f))
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            Text(stringResource(R.string.detail_info_title), fontWeight = FontWeight.SemiBold)
-            DetailInfoLine(label = stringResource(R.string.detail_label_source), value = detail.sourceSite.ifBlank { "MissAV" })
-            if (detail.code.isNotBlank()) {
-                DetailInfoLine(label = stringResource(R.string.detail_label_code), value = detail.code.uppercase(Locale.ROOT))
-            }
-            if (actressSummary.isNotBlank()) {
-                DetailInfoLine(label = stringResource(R.string.detail_label_actresses), value = actressSummary)
-            }
-            if (tagSummary.isNotBlank()) {
-                DetailInfoLine(label = stringResource(detailTagSectionTitleRes(detail.sourceSite)), value = tagSummary)
-            }
-            if (detail.availableSources.isNotEmpty()) {
-                DetailInfoLine(
-                    label = stringResource(R.string.detail_label_available_sources),
-                    value = stringResource(R.string.detail_available_sources_count, detail.availableSources.distinctBy { it.url }.size)
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun DetailInfoLine(label: String, value: String) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-        verticalAlignment = Alignment.Top
-    ) {
-        Text(
-            text = label,
-            color = TxtSecondary,
-            fontSize = 11.sp,
-            modifier = Modifier.width(52.dp)
-        )
-        Text(
-            text = value,
-            color = TxtPrimary,
-            fontSize = 12.sp,
-            lineHeight = 18.sp
         )
     }
 }
@@ -2909,12 +3147,6 @@ private fun capturePlaybackProgress(player: ExoPlayer?): Int {
     val position = player.currentPosition
     if (duration <= 0L || position <= 0L) return 0
     return ((position * 100) / duration).toInt().coerceIn(0, 100)
-}
-
-@Suppress("UNUSED_PARAMETER")
-@StringRes
-private fun detailTagSectionTitleRes(source: String): Int {
-    return R.string.detail_section_tags
 }
 
 @StringRes
