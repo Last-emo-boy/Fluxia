@@ -13,3 +13,5 @@ keystore.properties
 *.iml
 *.log
 temp_player.js
+
+*tmp_player.js
