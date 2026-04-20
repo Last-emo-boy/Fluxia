@@ -9,6 +9,7 @@ import org.jsoup.nodes.Document
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URI
+import java.net.URLDecoder
 import java.net.URLEncoder
 import java.util.Locale
 
@@ -18,7 +19,7 @@ private const val AV123_IFRAME_KEY = "QgYgkSJJnpAAWy31"
 private const val AV123_STREAM_KEY = "ym1eS4t0jTLakZYQ"
 private const val AV123_SURRIT_STREAM_URL = "https://surrit.store/stream"
 
-private val AV123_VIDEO_PATH_PATTERN = Regex("""/(?:[a-z]{2,3}/)?v/([a-z0-9-]+)""", RegexOption.IGNORE_CASE)
+private val AV123_VIDEO_PATH_PATTERN = Regex("""(?:^|/)(?:[a-z]{2,3}/)?v/([a-z0-9-]+)""", RegexOption.IGNORE_CASE)
 private val AV123_CODE_PATTERN = Regex("""(?i)\b[a-z0-9]+-[a-z0-9]+(?:-[a-z0-9]+)*\b""")
 private val AV123_MOVIE_ID_PATTERN = Regex("""Movie\(\{id:\s*(\d+)""", RegexOption.IGNORE_CASE)
 private val AV123_EMBED_ID_PATTERN = Regex("""/e/([A-Za-z0-9_-]+)""")
@@ -37,10 +38,13 @@ object Av123Parser {
         val cards = linkedMapOf<String, VideoCard>()
 
         doc.select(".box-item").forEach { box ->
-            val anchor = box.selectFirst(".thumb a[href], .detail a[href], a[href]")
+            val anchor = box.selectFirst(".thumb a[href*='v/']")
+                ?: box.selectFirst("a[href^='v/']")
+                ?: box.selectFirst("a[href*='/v/']")
+                ?: box.selectFirst("a[href*='v/']")
                 ?: return@forEach
             val href = resolveUrl(baseUrl, anchor.attr("href"))
-            if (!href.contains("/v/", ignoreCase = true)) return@forEach
+            if (!href.contains("/v/", ignoreCase = true) && !anchor.attr("href").startsWith("v/", ignoreCase = true)) return@forEach
 
             val code = extractCodeFromUrl(href).ifBlank {
                 extractCodeFromText(
@@ -81,13 +85,82 @@ object Av123Parser {
             }
         }
 
+        doc.select("a[href^='v/'], a[href*='/v/']").forEach { anchor ->
+            val rawHref = anchor.attr("href").trim()
+            if (rawHref.isBlank()) return@forEach
+            if (!rawHref.startsWith("v/", ignoreCase = true) && !rawHref.contains("/v/", ignoreCase = true)) return@forEach
+
+            val href = resolveUrl(baseUrl, rawHref)
+            val code = extractCodeFromUrl(href).ifBlank {
+                extractCodeFromText(
+                    chooseFirstNonBlank(
+                        anchor.attr("title"),
+                        anchor.text(),
+                        anchor.selectFirst("img")?.attr("alt"),
+                        anchor.selectFirst("img")?.attr("title")
+                    )
+                )
+            }
+            if (href.isBlank() || code.isBlank()) return@forEach
+
+            val container = anchor.parents().firstOrNull { parent ->
+                parent.hasClass("box-item") ||
+                    parent.hasClass("video") ||
+                    parent.hasClass("item") ||
+                    parent.hasClass("card")
+            } ?: anchor.parent() ?: anchor
+            val image = container.selectFirst("img") ?: anchor.selectFirst("img")
+            val title = chooseFirstNonBlank(
+                container.selectFirst(".detail a")?.text(),
+                container.selectFirst(".title")?.text(),
+                anchor.attr("title"),
+                anchor.text(),
+                image?.attr("alt"),
+                image?.attr("title")
+            ).ifBlank { code.uppercase(Locale.ROOT) }
+            val thumbnail = chooseFirstNonBlank(
+                image?.attr("data-src"),
+                image?.attr("data-original"),
+                image?.attr("src")
+            ).let { resolveUrl(baseUrl, it) }.ifBlank { null }
+
+            val candidate = VideoCard(
+                code = code,
+                title = title,
+                href = href,
+                thumbnail = thumbnail,
+                sourceSite = AV123_SOURCE_NAME
+            )
+            val key = href.lowercase(Locale.ROOT)
+            val current = cards[key]
+            if (current == null || shouldReplaceCard(current, candidate)) {
+                cards[key] = candidate
+            }
+        }
+
+        if (cards.isNotEmpty()) {
+            return cards.values.toList()
+        }
+
+        AV123_VIDEO_PATH_PATTERN.findAll(html).forEach { match ->
+            val code = match.groupValues.getOrNull(1).orEmpty().lowercase(Locale.ROOT)
+            if (code.isBlank()) return@forEach
+            val href = resolveUrl(baseUrl, "v/$code")
+            cards[href.lowercase(Locale.ROOT)] = VideoCard(
+                code = code,
+                title = code.uppercase(Locale.ROOT),
+                href = href,
+                thumbnail = null,
+                sourceSite = AV123_SOURCE_NAME
+            )
+        }
+
         return cards.values.toList()
     }
 
     fun parseVideoDetail(
         html: String,
         baseUrl: String,
-        ajaxJson: String,
         streamJson: String?
     ): VideoDetail {
         val doc = Jsoup.parse(html, baseUrl)
@@ -195,12 +268,14 @@ object Av123Parser {
             ?.let { URLEncoder.encode(it, Charsets.UTF_8.name()).replace("+", "%20") }
         val streamApiUrl = buildString {
             append(AV123_SURRIT_STREAM_URL)
-            append("?token=")
-            append(URLEncoder.encode(token, Charsets.UTF_8.name()).replace("+", "%20"))
             if (!encodedPoster.isNullOrBlank()) {
-                append("&poster=")
+                append("?poster=")
                 append(encodedPoster)
+                append("&token=")
+            } else {
+                append("?token=")
             }
+            append(URLEncoder.encode(token, Charsets.UTF_8.name()).replace("+", "%20"))
         }
         val iframeWithPoster = if (encodedPoster.isNullOrBlank()) {
             iframeUrl
@@ -226,15 +301,24 @@ object Av123Parser {
         val decodedBytes = decodeBase64(media) ?: return null
         val jsonText = xorBytes(decodedBytes, AV123_STREAM_KEY.toByteArray(Charsets.UTF_8))
             .toString(Charsets.UTF_8)
+        val trimmedJsonText = jsonText.trim()
+        val decodedJsonText = if (
+            trimmedJsonText.startsWith("%7B", ignoreCase = true) ||
+            trimmedJsonText.contains("%22stream%22", ignoreCase = true)
+        ) {
+            runCatching { URLDecoder.decode(trimmedJsonText, Charsets.UTF_8.name()) }.getOrDefault(trimmedJsonText)
+        } else {
+            trimmedJsonText
+        }
         val direct = runCatching {
-            val payload = JSONObject(jsonText)
+            val payload = JSONObject(decodedJsonText)
             payload.optString("stream")
         }.getOrNull().orEmpty()
         if (direct.isNotBlank()) {
             return direct.replace("\\/", "/")
         }
 
-        return AV123_STREAM_URL_PATTERN.find(jsonText)?.value?.replace("\\/", "/")
+        return AV123_STREAM_URL_PATTERN.find(decodedJsonText)?.value?.replace("\\/", "/")
     }
 
     private fun extractEncodedWatchUrl(ajaxJson: String): String? {
@@ -339,18 +423,18 @@ object Av123Parser {
         if (trimmed.isBlank()) return ""
         if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) return trimmed
         if (trimmed.startsWith("//")) return "https:$trimmed"
-
-        val normalizedBase = runCatching {
-            URI(baseUrl).run {
-                if (scheme.isNullOrBlank() || host.isNullOrBlank()) return@run AV123_BASE_URL
-                "${scheme}://${host}"
-            }
-        }.getOrDefault(AV123_BASE_URL)
-
-        return if (trimmed.startsWith("/")) {
-            normalizedBase + trimmed
-        } else {
-            "$normalizedBase/$trimmed"
+        if (trimmed.startsWith("v/", ignoreCase = true)) {
+            val locale = extractLocale(baseUrl)
+            return "$AV123_BASE_URL/$locale/$trimmed"
         }
+
+        return runCatching { URI(baseUrl).resolve(trimmed).toString() }
+            .getOrElse {
+                if (trimmed.startsWith("/")) {
+                    AV123_BASE_URL + trimmed
+                } else {
+                    "$AV123_BASE_URL/$trimmed"
+                }
+            }
     }
 }

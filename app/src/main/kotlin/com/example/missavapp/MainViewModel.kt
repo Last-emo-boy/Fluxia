@@ -306,7 +306,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         currentSectionPage = 1
         canLoadMoreSection = true
         isLoadingMoreSection = false
-        if (!isMissavFeedEnabled() && !isJableFeedEnabled()) {
+        if (!hasAnyFeedSourceEnabled()) {
             videos = LoadState.Success(emptyList())
             canLoadMoreSection = false
             uiMessage = appContext.getString(R.string.error_search_source_empty)
@@ -429,7 +429,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             detailState = when (result) {
                 is LoadState.Success -> {
                     val mergedThumbs = (result.data.thumbnails + thumbnails).filter { it.isNotBlank() }.distinct()
-                    val mergedSources = mergeSourceOptions(item, source, sourcesFromList)
+                    val mergedSources = mergeSourceOptions(item, source, sourcesFromList + result.data.availableSources)
                     val resolved = result.data.copy(
                         sourceSite = source,
                         sourceUrl = item.href,
@@ -476,7 +476,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     val resolved = result.data.copy(
                         sourceSite = source,
                         sourceUrl = url,
-                        availableSources = listOf(VideoSourceOption(source, url)).distinctBy { it.url }
+                        availableSources = (result.data.availableSources + VideoSourceOption(source, url)).distinctBy { it.url }
                     )
                     addWatchHistory(
                         VideoCard(
@@ -765,18 +765,61 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun hasAnyFeedSourceEnabled(): Boolean {
+        return isMissavFeedEnabled() || isJableFeedEnabled() || isAv01FeedEnabled() || is123AvFeedEnabled()
+    }
+
     private fun isMissavFeedEnabled(): Boolean = isSearchSiteEnabled(SiteRegistry.missav.id)
 
     private fun isJableFeedEnabled(): Boolean = isSearchSiteEnabled(SiteRegistry.jable.id)
 
+    private fun isAv01FeedEnabled(): Boolean = isSearchSiteEnabled(SiteRegistry.av01.id)
+
+    private fun is123AvFeedEnabled(): Boolean = isSearchSiteEnabled(SiteRegistry.av123.id)
+
     private suspend fun fetchCurrentFeedPage(section: MissAvSection, page: Int): LoadState<List<VideoCard>> {
-        return when {
-            isMissavFeedEnabled() -> withCloudflareRecovery(hostState) {
-                repo.fetchSection(section, _locale, page)
+        val candidates = buildList {
+            if (isMissavFeedEnabled()) {
+                add(
+                    withCloudflareRecovery(hostState) {
+                        repo.fetchSection(section, _locale, page)
+                    }
+                )
             }
-            isJableFeedEnabled() -> repo.fetchJableFeed(page)
-            else -> LoadState.Success(emptyList())
+            if (isJableFeedEnabled()) {
+                add(repo.fetchJableFeed(page))
+            }
+            if (isAv01FeedEnabled()) {
+                add(repo.fetchAv01Feed(page))
+            }
+            if (is123AvFeedEnabled()) {
+                add(repo.fetch123AvFeed(page))
+            }
         }
+        return mergeFeedStates(candidates)
+    }
+
+    private fun mergeFeedStates(candidates: List<LoadState<List<VideoCard>>>): LoadState<List<VideoCard>> {
+        val merged = mutableListOf<VideoCard>()
+        var hasCloudflare = false
+        var lastError: LoadState.Error? = null
+        candidates.forEach { state ->
+            when (state) {
+                is LoadState.Success -> merged += state.data
+                is LoadState.CloudflareChallenge -> hasCloudflare = true
+                is LoadState.Error -> lastError = state
+                is LoadState.Loading, is LoadState.Idle -> {}
+            }
+        }
+        if (merged.isNotEmpty()) {
+            return LoadState.Success(mergePagedVideos(emptyList(), merged))
+        }
+
+        if (hasCloudflare) {
+            return LoadState.CloudflareChallenge
+        }
+
+        return lastError ?: LoadState.Success(emptyList())
     }
 
     private fun applySearchPreferences() {

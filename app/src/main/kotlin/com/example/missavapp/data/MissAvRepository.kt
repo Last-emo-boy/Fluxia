@@ -122,6 +122,64 @@ class MissAvRepository(context: Context) {
         }
     }
 
+    suspend fun fetchAv01Feed(page: Int = 1): LoadState<List<VideoCard>> {
+        return withContext(Dispatchers.IO) {
+            val payload = JSONObject().apply {
+                put(
+                    "pagination",
+                    JSONObject().apply {
+                        put("page", page.coerceAtLeast(1))
+                        put("limit", 24)
+                    }
+                )
+            }
+
+            val response = client.performPostJson(
+                "https://www.av01.media/api/v1/videos/search?lang=ja",
+                payload
+            )
+            if (response.isFailure) {
+                return@withContext LoadState.Error(response.exceptionOrNull()?.message ?: text(R.string.error_network_generic))
+            }
+
+            val raw = response.getOrThrow()
+            if (raw.body.isCloudflareChallengePage()) {
+                return@withContext LoadState.CloudflareChallenge
+            }
+            if (raw.code !in 200..299 || raw.body.isBlank()) {
+                return@withContext LoadState.Error(text(R.string.error_load_failed_http, raw.code))
+            }
+
+            val geoJson = fetchAv01GeoJson()
+            return@withContext LoadState.Success(Av01Parser.parseSearchJson(raw.body, geoJson))
+        }
+    }
+
+    suspend fun fetch123AvFeed(page: Int = 1): LoadState<List<VideoCard>> {
+        val url = if (page <= 1) {
+            "https://123av.com/zh/dm9/recent-update"
+        } else {
+            "https://123av.com/zh/dm9/recent-update?page=${page.coerceAtLeast(1)}"
+        }
+
+        return withContext(Dispatchers.IO) {
+            val response = client.performGet(url, refererUrl = "https://123av.com/zh/dm9")
+            if (response.isFailure) {
+                return@withContext LoadState.Error(response.exceptionOrNull()?.message ?: text(R.string.error_network_generic))
+            }
+
+            val raw = response.getOrThrow()
+            if (raw.body.isCloudflareChallengePage()) {
+                return@withContext LoadState.CloudflareChallenge
+            }
+            if (raw.code !in 200..299 || raw.body.isBlank()) {
+                return@withContext LoadState.Error(text(R.string.error_load_failed_http, raw.code))
+            }
+
+            return@withContext LoadState.Success(Av123Parser.parseSearchList(raw.body, url))
+        }
+    }
+
     suspend fun search(keyword: String, locale: String = "cn"): LoadState<List<VideoCard>> {
         return searchAggregated(keyword, locale)
     }
@@ -524,9 +582,21 @@ class MissAvRepository(context: Context) {
     }
 
     private suspend fun searchAv01(encodedQuery: String): LoadState<List<VideoCard>> {
-        val url = "https://www.av01.media/jp/search?q=$encodedQuery"
+        val rawQuery = java.net.URLDecoder.decode(encodedQuery, Charsets.UTF_8.name()).trim()
+        val url = "https://www.av01.media/api/v1/videos/search?lang=ja"
+        val payload = JSONObject().apply {
+            put("query", rawQuery)
+            put(
+                "pagination",
+                JSONObject().apply {
+                    put("page", 1)
+                    put("limit", 24)
+                }
+            )
+        }
+
         return withContext(Dispatchers.IO) {
-            val response = client.performGet(url, refererUrl = "https://www.av01.media/jp")
+            val response = client.performPostJson(url, payload)
             if (response.isFailure) {
                 return@withContext LoadState.Error(response.exceptionOrNull()?.message ?: text(R.string.error_network_generic))
             }
@@ -539,24 +609,18 @@ class MissAvRepository(context: Context) {
                 return@withContext LoadState.Error(text(R.string.error_load_failed_http, raw.code))
             }
 
-            val list = Av01Parser.parseSearchList(raw.body, url)
+            val geoJson = fetchAv01GeoJson()
+            val list = runCatching { Av01Parser.parseSearchJson(raw.body, geoJson) }.getOrDefault(emptyList())
             return@withContext if (list.isNotEmpty()) {
                 LoadState.Success(list)
             } else {
-                LoadState.Error(text(R.string.error_no_results_for_query, java.net.URLDecoder.decode(encodedQuery, Charsets.UTF_8.name())))
+                LoadState.Error(text(R.string.error_no_results_for_query, rawQuery))
             }
         }
     }
 
     private suspend fun search123Av(encodedQuery: String): LoadState<List<VideoCard>> {
         val rawQuery = java.net.URLDecoder.decode(encodedQuery, Charsets.UTF_8.name()).trim()
-        if (looksLikeVideoCode(rawQuery)) {
-            val direct = fetchDirect123AvCodeResult(rawQuery)
-            if (direct is LoadState.Success && direct.data.isNotEmpty()) {
-                return direct
-            }
-        }
-
         val url = "https://123av.com/zh/search?keyword=$encodedQuery"
         return withContext(Dispatchers.IO) {
             val response = client.performGet(url, refererUrl = "https://123av.com/zh/")
@@ -575,6 +639,8 @@ class MissAvRepository(context: Context) {
             val list = Av123Parser.parseSearchList(raw.body, url)
             return@withContext if (list.isNotEmpty()) {
                 LoadState.Success(list)
+            } else if (looksLikeVideoCode(rawQuery)) {
+                fetchDirect123AvCodeResult(rawQuery)
             } else {
                 LoadState.Error(text(R.string.error_no_results_for_query, rawQuery))
             }
@@ -648,21 +714,14 @@ class MissAvRepository(context: Context) {
     }
 
     private suspend fun fetchAv01Detail(url: String): LoadState<VideoDetail> {
-        val pageResponse = client.performGet(url, refererUrl = "https://www.av01.media/jp")
-        if (pageResponse.isFailure) {
-            return LoadState.Error(pageResponse.exceptionOrNull()?.message ?: text(R.string.error_network_generic))
-        }
-
-        val rawPage = pageResponse.getOrThrow()
-        if (rawPage.body.isCloudflareChallengePage()) {
-            return LoadState.CloudflareChallenge
-        }
-        if (rawPage.code !in 200..299 || rawPage.body.isBlank()) {
-            return LoadState.Error(text(R.string.error_load_failed_http, rawPage.code))
-        }
-
         val videoId = Av01Parser.extractVideoId(url)
             ?: return LoadState.Error(text(R.string.error_detail_unavailable))
+
+        val pageBody = client.performGet(url, refererUrl = "https://www.av01.media/jp")
+            .getOrNull()
+            ?.takeIf { it.code in 200..299 && it.body.isNotBlank() && !it.body.isCloudflareChallengePage() }
+            ?.body
+            .orEmpty()
 
         val apiUrl = "https://www.av01.media/api/v1/videos/$videoId"
         val apiResponse = client.performGet(apiUrl, refererUrl = url)
@@ -683,15 +742,33 @@ class MissAvRepository(context: Context) {
             .getOrNull()
             ?.takeIf { it.code in 200..299 && it.body.isNotBlank() && !it.body.isCloudflareChallengePage() }
             ?.body
+        val geoJson = fetchAv01GeoJson()
+        val playlistSource = Av01Parser.buildSignedPlaylistUrl(videoId, geoJson)
+            ?.let { playlistUrl ->
+                client.performGet(playlistUrl, refererUrl = url)
+                    .getOrNull()
+                    ?.takeIf { it.code in 200..299 && it.body.isNotBlank() && !it.body.isCloudflareChallengePage() }
+                    ?.body
+            }
+            ?.let { Av01Parser.extractPlaylistSource(it) }
 
         return LoadState.Success(
             Av01Parser.parseVideoDetail(
-                html = rawPage.body,
+                html = pageBody,
                 baseUrl = url,
                 detailJson = rawApi.body,
-                similarsJson = similarsBody
+                similarsJson = similarsBody,
+                geoJson = geoJson,
+                playlistSource = playlistSource
             )
         )
+    }
+
+    private suspend fun fetchAv01GeoJson(): String? {
+        return client.performGet("https://files.iw01.xyz/edge/geo.js?json", refererUrl = "https://www.av01.media/")
+            .getOrNull()
+            ?.takeIf { it.code in 200..299 && it.body.isNotBlank() && !it.body.isCloudflareChallengePage() }
+            ?.body
     }
 
     private suspend fun fetch123AvDetail(url: String): LoadState<VideoDetail> {
@@ -727,17 +804,22 @@ class MissAvRepository(context: Context) {
         val posterUrl = Av123Parser.extractPosterUrl(rawPage.body, url)
         val streamRequest = Av123Parser.buildStreamRequest(rawAjax.body, posterUrl)
         val streamBody = streamRequest?.let { request ->
-            client.performGet(request.streamApiUrl, refererUrl = request.iframeUrl)
-                .getOrNull()
-                ?.takeIf { it.code in 200..299 && it.body.isNotBlank() && !it.body.isCloudflareChallengePage() }
-                ?.body
+            var body: String? = null
+            repeat(2) {
+                if (body == null) {
+                    body = client.performGet(request.streamApiUrl, refererUrl = request.iframeUrl)
+                        .getOrNull()
+                        ?.takeIf { it.code in 200..299 && it.body.isNotBlank() && !it.body.isCloudflareChallengePage() }
+                        ?.body
+                }
+            }
+            body
         }
 
         return LoadState.Success(
             Av123Parser.parseVideoDetail(
                 html = rawPage.body,
                 baseUrl = url,
-                ajaxJson = rawAjax.body,
                 streamJson = streamBody
             )
         )

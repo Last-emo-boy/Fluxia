@@ -119,6 +119,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
@@ -234,8 +235,18 @@ private fun normalizeSearchResults(videos: List<VideoCard>, query: String = ""):
         compareBy<VideoCard> { searchDisplayRank(it, normalizedQuery) }
             .thenByDescending { if (it.thumbnail.isNullOrBlank()) 0 else 1 }
             .thenBy { it.title.lowercase(Locale.ROOT) }
-            .thenBy { it.sourceSite.lowercase(Locale.ROOT) }
+        .thenBy { it.sourceSite.lowercase(Locale.ROOT) }
     )
+}
+
+private fun detailMatchesTarget(detail: VideoDetail, target: String?): Boolean {
+    val normalizedTarget = target?.trim().orEmpty()
+    if (normalizedTarget.isBlank()) return false
+    val sourceUrl = detail.sourceUrl.trim()
+    if (sourceUrl.isBlank()) return false
+    return sourceUrl.equals(normalizedTarget, ignoreCase = true) ||
+        sourceUrl.contains(normalizedTarget, ignoreCase = true) ||
+        normalizedTarget.contains(sourceUrl, ignoreCase = true)
 }
 
 @Composable
@@ -286,7 +297,7 @@ private fun AppScreen(vm: MainViewModel) {
     val playingDetail = when (val detailState = vm.detailState) {
         is LoadState.Success -> {
             val target = playingDetailUrl
-            detailState.data.takeIf { !target.isNullOrBlank() && it.sourceUrl.contains(target, ignoreCase = true) }
+            detailState.data.takeIf { detailMatchesTarget(it, target) }
         }
         else -> null
     }
@@ -323,7 +334,7 @@ private fun AppScreen(vm: MainViewModel) {
         val detailState = vm.detailState
         if (detailState is LoadState.Success) {
             val detail = detailState.data
-            if (detail.sourceUrl.contains(target, ignoreCase = true)) {
+            if (detailMatchesTarget(detail, target)) {
                 pendingPlaybackUrl = null
                 playingDetailUrl = detail.sourceUrl
             }
@@ -2263,7 +2274,15 @@ private fun VideoPlaybackSheet(
             ExoPlayer.Builder(context)
                 .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
                 .build().apply {
-                setMediaItem(MediaItem.fromUri(url))
+                val mediaItem = MediaItem.Builder()
+                    .setUri(url)
+                    .apply {
+                        if (isHlsPlaybackSource(url)) {
+                            setMimeType(MimeTypes.APPLICATION_M3U8)
+                        }
+                    }
+                    .build()
+                setMediaItem(mediaItem)
                 prepare()
                 playWhenReady = true
             }
@@ -2573,6 +2592,13 @@ private fun resolvePlayableMediaUrl(detail: VideoDetail): String? {
                     url.contains(".mp4", ignoreCase = true) ||
                     url.contains(".mkv", ignoreCase = true)
             }
+}
+
+private fun isHlsPlaybackSource(url: String): Boolean {
+    return url.contains(".m3u8", ignoreCase = true) ||
+        url.startsWith("data:application/x-mpegurl", ignoreCase = true) ||
+        url.startsWith("data:application/vnd.apple.mpegurl", ignoreCase = true) ||
+        url.startsWith("data:audio/mpegurl", ignoreCase = true)
 }
 
 private fun buildPlaybackHeaders(refererUrl: String, mediaUrl: String): Map<String, String> {

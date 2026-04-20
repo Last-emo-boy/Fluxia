@@ -11,11 +11,49 @@ import org.json.JSONObject
 import java.net.URI
 import java.util.Locale
 
-private val AV01_VIDEO_ID_PATTERN = Regex("""/jp/video/(\d+)""", RegexOption.IGNORE_CASE)
-private val AV01_VIDEO_CODE_PATTERN = Regex("""/jp/video/\d+/([a-z0-9-]+)""", RegexOption.IGNORE_CASE)
+private val AV01_VIDEO_ID_PATTERN = Regex("""/(?:[a-z]{2}/)?video/(\d+)""", RegexOption.IGNORE_CASE)
+private val AV01_VIDEO_CODE_PATTERN = Regex("""/(?:[a-z]{2}/)?video/\d+/([a-z0-9-]+)""", RegexOption.IGNORE_CASE)
 private val AV01_CODE_FALLBACK_PATTERN = Regex("""(?i)\b[a-z0-9]+-[a-z0-9]+(?:-[a-z0-9]+)*\b""")
 
 object Av01Parser {
+    fun parseSearchJson(rawJson: String, geoJson: String? = null): List<VideoCard> {
+        val root = JSONObject(rawJson)
+        val geo = parseGeo(geoJson)
+        val videos = root.optJSONArray("videos")
+            ?: root.optJSONObject("result")?.optJSONArray("videos")
+            ?: root.optJSONObject("data")?.optJSONArray("videos")
+            ?: root.optJSONArray("items")
+            ?: root.optJSONObject("result")?.optJSONArray("items")
+            ?: root.optJSONObject("data")?.optJSONArray("items")
+            ?: JSONArray()
+
+        return buildList {
+            for (index in 0 until videos.length()) {
+                val item = videos.optJSONObject(index) ?: continue
+                val code = chooseFirstNonBlank(
+                    item.optString("dvd_id"),
+                    item.optString("dmm_id"),
+                    item.optString("slug")
+                )
+                if (code.isBlank()) continue
+
+                add(
+                    VideoCard(
+                        code = code.lowercase(Locale.ROOT),
+                        title = chooseFirstNonBlank(
+                            pickTranslatedTitle(item.optJSONObject("title_translations")),
+                            item.optString("title"),
+                            code.uppercase(Locale.ROOT)
+                        ),
+                        href = buildDetailUrl(item, code),
+                        thumbnail = buildThumbnail(item, geo),
+                        sourceSite = "AV01"
+                    )
+                )
+            }
+        }.distinctBy { it.href.lowercase(Locale.ROOT) }
+    }
+
     fun parseSearchList(html: String, baseUrl: String): List<VideoCard> {
         val doc = Jsoup.parse(html, baseUrl)
         val cards = linkedMapOf<String, VideoCard>()
@@ -46,10 +84,13 @@ object Av01Parser {
         html: String,
         baseUrl: String,
         detailJson: String,
-        similarsJson: String?
+        similarsJson: String?,
+        geoJson: String? = null,
+        playlistSource: String? = null
     ): VideoDetail {
         val doc = Jsoup.parse(html, baseUrl)
         val video = unwrapVideoObject(JSONObject(detailJson))
+        val geo = parseGeo(geoJson)
         val videoId = extractVideoId(baseUrl).orEmpty()
         val code = chooseFirstNonBlank(
             video.optString("dvd_id"),
@@ -67,30 +108,20 @@ object Av01Parser {
             listOf(
                 doc.selectFirst("meta[property=og:image]")?.attr("content"),
                 doc.selectFirst("meta[name=twitter:image]")?.attr("content"),
-                video.optString("thumbnail_url"),
-                video.optString("image"),
-                video.optString("poster")
+                usableUrlField(video.optString("thumbnail_url")),
+                usableUrlField(video.optString("image")),
+                usableUrlField(video.optString("poster"))
             ).forEach { value ->
                 resolveUrl(baseUrl, value).takeIf { it.isNotBlank() }?.let(::add)
             }
 
-            val storageBase = video.optString("storage_base").trim().trimEnd('/')
-            if (storageBase.isNotBlank()) {
-                listOf(
-                    "$storageBase/800.webp",
-                    "$storageBase/cover.webp",
-                    "$storageBase/cover.jpg",
-                    "$storageBase/poster.webp"
-                ).forEach(::add)
-            }
+            buildThumbnail(video, geo)?.let(::add)
         }.distinct()
 
-        val recommendations = parseSimilarVideos(similarsJson, code)
+        val recommendations = parseSimilarVideos(similarsJson, code, geo)
         val actresses = parseActresses(video.optJSONArray("actresses"))
         val tags = parseTags(video.optJSONArray("tags"))
-        val hlsUrl = videoId.takeIf { it.isNotBlank() }?.let {
-            "https://www.av01.media/api/v1/videos/$it/manifest/master.m3u8"
-        }
+        val hlsUrl = playlistSource?.takeIf { it.isPlayablePlaylistSource() }
 
         return VideoDetail(
             code = code,
@@ -110,12 +141,36 @@ object Av01Parser {
         return AV01_VIDEO_ID_PATTERN.find(url)?.groupValues?.getOrNull(1)?.takeIf { it.isNotBlank() }
     }
 
+    fun buildSignedPlaylistUrl(videoId: String, geoJson: String?): String? {
+        val geo = parseGeo(geoJson) ?: return null
+        val expires = encodeQueryValue(geo.expires)
+        val ip = encodeQueryValue(geo.ip)
+        val credential = if (geo.tokenV2.isNotBlank()) {
+            "token_v2=${encodeQueryValue(geo.tokenV2)}"
+        } else {
+            "token=${encodeQueryValue(geo.token)}"
+        }
+        return "https://www.av01.media/api/v1/videos/$videoId/playlist?expires=$expires&ip=$ip&$credential"
+    }
+
+    fun extractPlaylistSource(playlistJson: String?): String? {
+        if (playlistJson.isNullOrBlank()) return null
+        return runCatching {
+            val root = JSONObject(playlistJson)
+            chooseFirstNonBlank(
+                root.optString("src"),
+                root.optString("url"),
+                root.optString("playlist")
+            ).takeIf { it.isPlayablePlaylistSource() }
+        }.getOrNull()
+    }
+
     private fun unwrapVideoObject(root: JSONObject): JSONObject {
         val result = root.optJSONObject("result") ?: root
         return result.optJSONObject("video") ?: result
     }
 
-    private fun parseSimilarVideos(raw: String?, currentCode: String): List<VideoCard> {
+    private fun parseSimilarVideos(raw: String?, currentCode: String, geo: Av01Geo?): List<VideoCard> {
         if (raw.isNullOrBlank()) return emptyList()
         val root = JSONObject(raw)
         val result = root.optJSONObject("result") ?: root
@@ -141,7 +196,7 @@ object Av01Parser {
                             code.uppercase(Locale.ROOT)
                         ),
                         href = href,
-                        thumbnail = buildThumbnail(item),
+                        thumbnail = buildThumbnail(item, geo),
                         sourceSite = "AV01"
                     )
                 )
@@ -206,21 +261,26 @@ object Av01Parser {
         }
     }
 
-    private fun buildThumbnail(item: JSONObject): String? {
+    private fun buildThumbnail(item: JSONObject, geo: Av01Geo?): String? {
         val direct = chooseFirstNonBlank(
-            item.optString("thumbnail_url"),
-            item.optString("image"),
-            item.optString("poster")
+            usableUrlField(item.optString("thumbnail_url")),
+            usableUrlField(item.optString("image")),
+            usableUrlField(item.optString("poster"))
         )
         if (direct.isNotBlank()) return resolveUrl("https://www.av01.media", direct)
 
-        val storageBase = item.optString("storage_base").trim().trimEnd('/')
-        if (storageBase.isBlank()) return null
-        return listOf(
-            "$storageBase/800.webp",
-            "$storageBase/cover.webp",
-            "$storageBase/cover.jpg"
-        ).firstOrNull()
+        val id = item.optLong("id").takeIf { it > 0 } ?: return null
+        if (geo == null) return null
+
+        val r2Status = item.optString("r2_status").trim().uppercase(Locale.ROOT)
+        return if (geo.r2Cover && geo.tokenV2.isNotBlank() && (r2Status == "COVER_ONLY" || r2Status == "COMPLETE")) {
+            "https://files.iw01.xyz/covers/$id/800.webp?token_v2=${geo.tokenV2}&expires=${geo.expires}&ip=${geo.ip}"
+        } else if (geo.token.isNotBlank()) {
+            val host = if (geo.continent.equals("EU", ignoreCase = true)) "https://static2.av01.tv" else "https://static.av01.tv"
+            "$host/media/videos/tmb/$id/1.jpg/format=webp/wlv=800?t=${geo.token}&e=${geo.expires}&ip=${geo.ip}"
+        } else {
+            null
+        }
     }
 
     private fun pickTranslatedTitle(translations: JSONObject?): String {
@@ -313,6 +373,30 @@ object Av01Parser {
         return values.firstOrNull { it.trim().isNotBlank() }.orEmpty().trim()
     }
 
+    private fun usableUrlField(value: String?): String {
+        val trimmed = value.orEmpty().trim()
+        if (trimmed.isBlank()) return ""
+        if (trimmed.equals("true", ignoreCase = true) || trimmed.equals("false", ignoreCase = true)) return ""
+        return trimmed
+    }
+
+    private fun parseGeo(raw: String?): Av01Geo? {
+        if (raw.isNullOrBlank()) return null
+        return runCatching {
+            val obj = JSONObject(raw)
+            Av01Geo(
+                token = obj.optString("token"),
+                tokenV2 = obj.optString("token_v2"),
+                expires = obj.optString("expires"),
+                ip = obj.optString("ip"),
+                continent = obj.optString("continent"),
+                r2Cover = obj.optBoolean("r2_cover", false)
+            )
+        }.getOrNull()?.takeIf {
+            it.expires.isNotBlank() && it.ip.isNotBlank() && (it.token.isNotBlank() || it.tokenV2.isNotBlank())
+        }
+    }
+
     private fun resolveUrl(baseUrl: String, href: String?): String {
         val trimmed = href.orEmpty().trim()
         if (trimmed.isBlank()) return ""
@@ -332,4 +416,24 @@ object Av01Parser {
             "$normalizedBase/$trimmed"
         }
     }
+
+    private fun String.isPlayablePlaylistSource(): Boolean {
+        return startsWith("data:application/x-mpegurl", ignoreCase = true) ||
+            startsWith("data:application/vnd.apple.mpegurl", ignoreCase = true) ||
+            startsWith("data:audio/mpegurl", ignoreCase = true) ||
+            contains(".m3u8", ignoreCase = true)
+    }
+
+    private fun encodeQueryValue(value: String): String {
+        return java.net.URLEncoder.encode(value, Charsets.UTF_8.name()).replace("+", "%20")
+    }
 }
+
+private data class Av01Geo(
+    val token: String,
+    val tokenV2: String,
+    val expires: String,
+    val ip: String,
+    val continent: String,
+    val r2Cover: Boolean
+)
