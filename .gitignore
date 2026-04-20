@@ -1,0 +1,15 @@
+.gradle/
+.idea/
+.playwright-cli/
+build/
+app/build/
+output/
+
+local.properties
+keystore.properties
+*.jks
+*.keystore
+
+*.iml
+*.log
+temp_player.js
