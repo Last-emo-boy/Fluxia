@@ -136,7 +136,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     var githubUpdateInProgress by mutableStateOf(false)
         private set
 
-    val currentVersionName: String = BuildConfig.VERSION_NAME
+    val currentVersionName: String = readCurrentVersionName()
 
     val locale: String
         get() = _locale
@@ -1186,6 +1186,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun videoIdentityKey(video: VideoCard): String {
         val source = video.sourceSite.ifBlank { inferSource(video.href) }
         return "${video.code.ifBlank { video.href }}|$source|${video.href}"
+    }
+
+    private fun readCurrentVersionName(): String {
+        return runCatching {
+            val packageInfo = appContext.packageManager.getPackageInfo(appContext.packageName, 0)
+            packageInfo.versionName.orEmpty()
+        }.getOrDefault("1.0.0").ifBlank { "1.0.0" }
     }
 
     override fun onCleared() {
