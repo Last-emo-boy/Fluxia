@@ -44,6 +44,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private const val SEARCH_SITES_KEY = "search_sites"
         private const val SEARCH_MISSAV_HOSTS_KEY = "search_missav_hosts"
         private const val GITHUB_UPDATE_REPO_KEY = "github_update_repo"
+        private const val DEFAULT_GITHUB_UPDATE_REPO = "Last-emo-boy/Fluxia"
         private const val MAX_SEARCH_HISTORY = 16
         private const val MAX_FAVORITE = 300
         private const val MAX_HISTORY = 300
@@ -150,7 +151,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         autoCloudflareEnabled = cfBypassPrefs.getBoolean(CF_AUTO_PROMPT_PREF, true)
         searchSiteStates = restoreSearchSiteStates()
         missavSearchHostStates = restoreMissavSearchHostStates()
-        githubReleaseRepo = localLibraryPrefs.getString(GITHUB_UPDATE_REPO_KEY, "").orEmpty()
+        githubReleaseRepo = localLibraryPrefs.getString(GITHUB_UPDATE_REPO_KEY, DEFAULT_GITHUB_UPDATE_REPO)
+            .orEmpty()
+            .ifBlank { DEFAULT_GITHUB_UPDATE_REPO }
         applySearchPreferences()
         recentSearches = restoreRecentSearches()
         favoriteVideos = restoreFavoriteVideos()
